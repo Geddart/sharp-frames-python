@@ -310,7 +310,8 @@ class FrameExtractor:
         # Build video filters
         vf_filters = [f"fps={fps}"]
         if width > 0:
-            vf_filters.append(f"scale={width}:-1")
+            # Use lanczos scaling for high-quality downsampling
+            vf_filters.append(f"scale={width}:-1:flags=lanczos")
         
         vf_string = ",".join(vf_filters)
         
@@ -319,11 +320,20 @@ class FrameExtractor:
         
         # Build FFmpeg command - normalize paths for Windows
         cmd = [
-            ffmpeg_executable, '-i', os.path.normpath(video_path),
+            ffmpeg_executable, 
+            '-hwaccel', 'auto',  # Auto-detect and use available hardware acceleration
+            '-i', os.path.normpath(video_path),
             '-vf', vf_string,
+        ]
+        
+        # Add quality settings for JPEG output
+        if output_format.lower() in ['jpg', 'jpeg']:
+            cmd.extend(['-q:v', '1'])  # Highest JPEG quality (1-31, lower is better)
+        
+        cmd.extend([
             '-y',  # Overwrite output files
             os.path.normpath(output_pattern)
-        ]
+        ])
         
         try:
             # Estimate total frames if duration is available
