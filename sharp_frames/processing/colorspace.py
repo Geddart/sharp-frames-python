@@ -5,11 +5,24 @@ and generates appropriate FFmpeg filter chains to convert to sRGB/BT.709.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from enum import Enum
 import subprocess
 import json
 import os
+
+
+__all__ = [
+    'VideoColorInfo',
+    'ColorPrimaries',
+    'TransferFunction',
+    'ColorMatrix',
+    'detect_color_space',
+    'parse_color_info_from_stream',
+    'build_colorspace_filter',
+    'get_color_info_description',
+    'is_zscale_available',
+]
 
 
 class ColorPrimaries(Enum):
@@ -124,14 +137,24 @@ def detect_color_space(video_path: str) -> VideoColorInfo:
             return _default_color_info()
 
         stream = streams[0]
-        return _parse_color_info(stream)
+        return parse_color_info_from_stream(stream)
 
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, OSError):
         return _default_color_info()
 
 
-def _parse_color_info(stream: Dict[str, Any]) -> VideoColorInfo:
-    """Parse ffprobe stream data into VideoColorInfo."""
+def parse_color_info_from_stream(stream: Dict[str, Any]) -> VideoColorInfo:
+    """Parse ffprobe stream data into VideoColorInfo.
+
+    This can be used to extract color info from existing ffprobe data
+    without making an additional subprocess call.
+
+    Args:
+        stream: A video stream dict from ffprobe JSON output
+
+    Returns:
+        VideoColorInfo with parsed color space information
+    """
     # Extract color metadata
     color_primaries_str = stream.get('color_primaries', 'unknown')
     transfer_str = stream.get('color_transfer', 'unknown')
@@ -242,21 +265,44 @@ def _build_hdr_to_sdr_filter(color_info: VideoColorInfo) -> str:
     Uses zscale for high-quality conversion if available,
     otherwise falls back to basic colorspace filter.
     """
+    # Determine input transfer function for zscale
+    if color_info.transfer_function == TransferFunction.PQ:
+        transfer_in = "smpte2084"
+    elif color_info.transfer_function == TransferFunction.HLG:
+        transfer_in = "arib-std-b67"
+    else:
+        transfer_in = "smpte2084"  # Default to PQ for unknown HDR
+
+    # Determine input primaries
+    if color_info.color_primaries == ColorPrimaries.BT2020:
+        primaries_in = "bt2020"
+    elif color_info.color_primaries == ColorPrimaries.DISPLAY_P3:
+        primaries_in = "smpte432"
+    else:
+        primaries_in = "bt2020"  # Default to BT.2020 for HDR
+
+    # Determine input matrix
+    if color_info.color_matrix in [ColorMatrix.BT2020_NCL, ColorMatrix.BT2020_CL]:
+        matrix_in = "bt2020nc"
+    else:
+        matrix_in = "bt2020nc"  # Default for HDR
+
     if is_zscale_available():
         # Full HDR to SDR pipeline with tone mapping
-        # This handles PQ (HDR10/Dolby Vision) and HLG
+        # Explicitly specify input parameters for reliable conversion
         filter_chain = (
-            "zscale=t=linear:npl=100,"      # Linearize (handles PQ/HLG)
-            "format=gbrpf32le,"              # High precision intermediate
-            "zscale=p=bt709,"                # Convert primaries to BT.709
-            "tonemap=hable:desat=0,"         # Hable tone mapping (filmic)
-            "zscale=t=bt709:m=bt709:r=tv,"   # Apply BT.709 transfer/matrix
-            "format=yuv420p"                 # Standard output format
+            f"zscale=tin={transfer_in}:min={matrix_in}:pin={primaries_in}:"
+            f"t=linear:npl=100,"                # Linearize with input specs
+            "format=gbrpf32le,"                  # High precision intermediate
+            "zscale=p=bt709,"                    # Convert primaries to BT.709
+            "tonemap=hable:desat=0,"             # Hable tone mapping (filmic)
+            "zscale=t=bt709:m=bt709:r=tv,"       # Apply BT.709 transfer/matrix
+            "format=yuv420p"                     # Standard output format
         )
     else:
         # Fallback: basic colorspace conversion (won't tone map properly)
         # This is better than nothing but may clip highlights
-        filter_chain = "colorspace=all=bt709:fast=0"
+        filter_chain = f"colorspace=all=bt709:iall={primaries_in}:fast=0"
 
     return filter_chain
 
