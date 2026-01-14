@@ -12,6 +12,8 @@ import cv2
 from tqdm import tqdm
 
 from ..models.frame_data import FrameData
+from .gps_extractor import GPSData
+from .exif_writer import embed_gps_in_jpeg
 
 
 class ImageProcessingError(Exception):
@@ -43,22 +45,24 @@ class FrameSaver:
         if progress_bar and hasattr(progress_bar, 'update'):
             progress_bar.update(n)
     
-    def save_frames(self, selected_frames: List[FrameData], config: Dict[str, Any]) -> bool:
+    def save_frames(self, selected_frames: List[FrameData], config: Dict[str, Any],
+                    gps_data: Optional[GPSData] = None) -> bool:
         """
         Save frames with proper naming based on input type.
-        
+
         Args:
             selected_frames: List of selected FrameData objects
             config: Configuration dictionary containing output settings
-            
+            gps_data: Optional GPS data to embed in the first frame's EXIF
+
         Returns:
             True if all frames saved successfully, False otherwise
         """
-        
+
         if not selected_frames:
             print("No frames to save.")
             return True
-        
+
         output_dir = config['output_dir']
         output_format = config.get('output_format', self.DEFAULT_OUTPUT_FORMAT)
         width = config.get('width', 0)
@@ -90,11 +94,18 @@ class FrameSaver:
                     # Determine output filename based on input type and frame data
                     filename = self._get_output_filename(frame, i, input_type, output_format)
                     dst_path = os.path.join(output_dir, filename)
-                    
+
                     # Save the frame (with optional resizing)
                     if self._save_single_frame(frame.path, dst_path, width, input_type):
                         success_count += 1
-                        
+
+                        # Embed GPS in first JPEG frame only
+                        if i == 0 and gps_data is not None and output_format.lower() in ['jpg', 'jpeg']:
+                            if embed_gps_in_jpeg(dst_path, gps_data):
+                                print(f"GPS coordinates embedded in {filename}")
+                            else:
+                                print(f"Warning: Failed to embed GPS in {filename}")
+
                         # Add to metadata
                         metadata_list.append({
                             "output_filename": filename,
@@ -106,11 +117,11 @@ class FrameSaver:
                         })
                     else:
                         print(f"Failed to save frame: {frame.path}")
-                    
+
                 except Exception as e:
                     print(f"Error saving frame {frame.path}: {e}")
                     continue
-                
+
                 self._update_progress(progress_bar)
         
         # Save metadata

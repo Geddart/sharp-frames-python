@@ -171,9 +171,12 @@ class TUIProcessor:
             selection_config = config.copy()
             selection_config['selection_method'] = method
             selection_config.update(params)
-            
-            # Save frames
-            success = self.saver.save_frames(selected_frames, selection_config)
+
+            # Get GPS data from extraction metadata (if available)
+            gps_data = self.current_result.metadata.get('gps') if self.current_result else None
+
+            # Save frames (with GPS data for first frame if available)
+            success = self.saver.save_frames(selected_frames, selection_config, gps_data=gps_data)
             
             if success:
                 print("Selection and saving completed successfully.")

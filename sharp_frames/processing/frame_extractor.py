@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ..models.frame_data import FrameData, ExtractionResult
 from ..video_utils import get_video_files_in_directory
+from .gps_extractor import GPSData, parse_iso6709
 
 if TYPE_CHECKING:
     from .colorspace import VideoColorInfo
@@ -110,14 +111,18 @@ class FrameExtractor:
                 )
                 frames.append(frame)
             
+            # Extract GPS from video metadata
+            gps_data = self._extract_gps_from_video_info(video_info)
+
             metadata = {
                 'fps': fps,
                 'duration': duration,
                 'source_video': video_path,
                 'total_frames_extracted': len(frames),
-                'output_format': output_format
+                'output_format': output_format,
+                'gps': gps_data  # May be None if no GPS in video
             }
-            
+
             return ExtractionResult(
                 frames=frames,
                 metadata=metadata,
@@ -155,35 +160,42 @@ class FrameExtractor:
             all_frames = []
             global_index = 0
             successful_videos = 0
-            
+            first_video_gps = None  # GPS from first video
+
             for video_index, video_path in enumerate(video_files):
                 video_name = f"video_{video_index + 1:03d}"
-                
+
                 try:
                     # Extract frames from this video
                     video_frames = self._extract_single_video(
                         video_path, video_index, temp_dir, config
                     )
-                    
+
+                    # Get GPS from first video only
+                    if video_index == 0 and first_video_gps is None:
+                        video_info = self._get_video_info(video_path)
+                        first_video_gps = self._extract_gps_from_video_info(video_info)
+
                     # Update global indices and add to collection
                     for frame in video_frames:
                         frame.index = global_index
                         global_index += 1
                         all_frames.append(frame)
-                    
+
                     successful_videos += 1
-                    
+
                 except Exception as e:
                     print(f"Warning: Failed to extract frames from {os.path.basename(video_path)}: {e}")
                     continue
-            
+
             metadata = {
                 'video_count': len(video_files),
                 'successful_videos': successful_videos,
                 'video_directory': video_directory,
                 'fps': fps,
                 'total_frames_extracted': len(all_frames),
-                'output_format': output_format
+                'output_format': output_format,
+                'gps': first_video_gps  # GPS from first video
             }
             
             return ExtractionResult(
@@ -315,6 +327,29 @@ class FrameExtractor:
             duration_str = format_info.get('duration')
             return float(duration_str) if duration_str else None
         except (ValueError, TypeError):
+            return None
+
+    def _extract_gps_from_video_info(self, video_info: Dict[str, Any]) -> Optional[GPSData]:
+        """Extract GPS coordinates from video info (from ffprobe format tags)."""
+        try:
+            tags = video_info.get('format', {}).get('tags', {})
+
+            # Try Apple QuickTime location format
+            location_str = tags.get('com.apple.quicktime.location.ISO6709')
+            if location_str:
+                gps = parse_iso6709(location_str)
+                if gps:
+                    # Try to get accuracy
+                    accuracy_str = tags.get('com.apple.quicktime.location.accuracy.horizontal')
+                    if accuracy_str:
+                        try:
+                            gps.accuracy = float(accuracy_str)
+                        except ValueError:
+                            pass
+                    return gps
+
+            return None
+        except Exception:
             return None
 
     def _extract_color_info_from_video_info(self, video_info: Dict[str, Any]) -> 'VideoColorInfo':
