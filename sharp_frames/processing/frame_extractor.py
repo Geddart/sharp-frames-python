@@ -67,21 +67,30 @@ class FrameExtractor:
     
     def _extract_video_frames(self, config: Dict[str, Any]) -> ExtractionResult:
         """Extract frames from single video file."""
+        from .colorspace import detect_color_space, get_color_info_description
+
         video_path = config['input_path']
         fps = config.get('fps', 10)
         output_format = config.get('output_format', 'jpg')
         width = config.get('width', 0)
-        
+
         # Create temporary directory for extraction
         temp_dir = self._create_temp_directory()
-        
+
         try:
             # Extract video info
             video_info = self._get_video_info(video_path)
             duration = self._extract_duration_from_info(video_info)
-            
-            # Perform FFmpeg extraction
-            if not self._run_ffmpeg_extraction(video_path, temp_dir, fps, output_format, width, duration):
+
+            # Detect color space for proper conversion
+            color_info = detect_color_space(video_path)
+            if color_info.needs_conversion:
+                color_desc = get_color_info_description(color_info)
+                if self.progress_callback:
+                    self.progress_callback("extraction", 0, 0, f"Detected {color_desc}, will convert to sRGB")
+
+            # Perform FFmpeg extraction with color space handling
+            if not self._run_ffmpeg_extraction(video_path, temp_dir, fps, output_format, width, duration, color_info):
                 raise RuntimeError("Frame extraction failed")
             
             # Get extracted frame paths
@@ -189,20 +198,25 @@ class FrameExtractor:
     
     def _extract_single_video(self, video_path: str, video_index: int, temp_dir: str, config: Dict[str, Any]) -> List[FrameData]:
         """Extract frames from a single video with video attribution."""
+        from .colorspace import detect_color_space
+
         video_name = f"video_{video_index + 1:03d}"
         video_temp_dir = os.path.join(temp_dir, video_name)
         os.makedirs(video_temp_dir, exist_ok=True)
-        
+
         fps = config.get('fps', 10)
         output_format = config.get('output_format', 'jpg')
         width = config.get('width', 0)
-        
+
         # Get video info
         video_info = self._get_video_info(video_path)
         duration = self._extract_duration_from_info(video_info)
-        
-        # Extract frames
-        if not self._run_ffmpeg_extraction(video_path, video_temp_dir, fps, output_format, width, duration):
+
+        # Detect color space for proper conversion
+        color_info = detect_color_space(video_path)
+
+        # Extract frames with color space handling
+        if not self._run_ffmpeg_extraction(video_path, video_temp_dir, fps, output_format, width, duration, color_info):
             raise RuntimeError(f"Failed to extract frames from {video_path}")
         
         # Get extracted frame files
@@ -302,17 +316,31 @@ class FrameExtractor:
         except (ValueError, TypeError):
             return None
     
-    def _run_ffmpeg_extraction(self, video_path: str, output_dir: str, fps: int, 
-                              output_format: str, width: int, duration: Optional[float] = None) -> bool:
-        """Run FFmpeg to extract frames from video with progress monitoring."""
+    def _run_ffmpeg_extraction(self, video_path: str, output_dir: str, fps: int,
+                              output_format: str, width: int, duration: Optional[float] = None,
+                              color_info: Optional[Any] = None) -> bool:
+        """Run FFmpeg to extract frames from video with progress monitoring and color space conversion."""
+        from .colorspace import build_colorspace_filter
+
         output_pattern = os.path.join(output_dir, f"frame_%05d.{output_format}")
-        
-        # Build video filters
-        vf_filters = [f"fps={fps}"]
+
+        # Build video filters - order matters!
+        vf_filters = []
+
+        # 1. Color space conversion FIRST (before any scaling)
+        if color_info is not None:
+            colorspace_filter = build_colorspace_filter(color_info)
+            if colorspace_filter:
+                vf_filters.append(colorspace_filter)
+
+        # 2. FPS filter
+        vf_filters.append(f"fps={fps}")
+
+        # 3. Scale filter (after color conversion)
         if width > 0:
             # Use lanczos scaling for high-quality downsampling
             vf_filters.append(f"scale={width}:-1:flags=lanczos")
-        
+
         vf_string = ",".join(vf_filters)
         
         # Use proper executable name based on platform
